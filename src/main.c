@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <commctrl.h>
 #include <tlhelp32.h>
+#include <shobjidl_core.h>
 
 #ifdef UNICODE
 #define _WinMain wWinMain
@@ -33,9 +34,11 @@ typedef struct {
     HINSTANCE hInstance;
     HWND hWnd;
     HWND hProcessListView;
+    HWND hSelectedDllLabel;
+    HWND hSelectedDllIcon;
     FILE *console;
     int exitCode;
-    TCHAR *selectedDllPath;
+    TCHAR selectedDllPath[MAX_PATH];
 } InjectorCtx;
 
 typedef struct {
@@ -65,13 +68,14 @@ void CleanupProcessListView(HWND);
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 
+int GetDLLPath(InjectorCtx*);
 
 IconCache *CreateIconCache(void);
 void DestroyIconCache(IconCache *ic);
 int InsertIconToCache(IconCache *ic, const TCHAR *path, int imageIndex);
 IconCacheEntry *FindIconInCache(IconCache *ic, const TCHAR *path);
 
-HICON LoadStockIcon(SHSTOCKICONID id, UINT uFlags);
+
 
 int WINAPI _WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPTSTR lpCmdLine, _In_ int nShowCmd) {
     InjectorCtx ctx = { 0 };
@@ -205,7 +209,7 @@ int InitUI(HWND hWnd, InjectorCtx *ctx) {
 
     if (InitProcessListView(ctx->hProcessListView) != 0) return 1;
 
-    CreateWindow(WC_STATIC, TEXT("Simple Injector"), WS_CHILD | WS_VISIBLE, 150, 5, WINDOW_WIDTH - 50, 35, hWnd, NULL, NULL, NULL);
+    CreateWindow(WC_STATIC, TEXT("Simple Injector"), WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, 150, 5, WINDOW_WIDTH - 50, 35, hWnd, NULL, NULL, NULL);
 
     HWND hButton = CreateWindow(
         WC_BUTTON,
@@ -236,6 +240,28 @@ int InitUI(HWND hWnd, InjectorCtx *ctx) {
         NULL,
         NULL
     );
+
+    ctx->hSelectedDllLabel = CreateWindow(
+        WC_STATIC,
+        NULL,
+        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+        165, 400, 100, 35,
+        hWnd, NULL, NULL, NULL
+    );
+
+    ctx->hSelectedDllIcon = CreateWindow(
+        WC_STATIC,
+        NULL,
+        WS_CHILD | SS_ICON,
+        130, 400, 35, 35,
+        hWnd, NULL, NULL, NULL
+    );
+
+    SHFILEINFO sfi = { 0 };
+    SHGetFileInfo(TEXT(".dll"), FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi),
+        SHGFI_USEFILEATTRIBUTES | SHGFI_ICON);
+    
+    SendMessage(ctx->hSelectedDllIcon, STM_SETICON, (WPARAM)sfi.hIcon, 0);
 
     return 0;
 }
@@ -375,18 +401,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             break;
         case BUTTON_SELECT_DLL:
         {
-            TCHAR fileName[MAX_PATH];
-            OPENFILENAME ofn = { 0 };
-            ofn.lStructSize = sizeof(ofn);
-            ofn.hwndOwner = hWnd;
-            ofn.lpstrFilter = TEXT(".DLL");
-            ofn.lpstrFile = fileName;
-            ofn.nMaxFile = MAX_PATH;
-            ofn.nFilterIndex = 1;
-            ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
-
-            if (GetOpenFileName(&ofn)) {
-                log_msg("%s", fileName);
+            if (GetDLLPath(ctx)) {
+                ShowWindow(ctx->hSelectedDllIcon, SW_SHOW);
+                Static_SetText(ctx->hSelectedDllLabel, _tcsrchr(ctx->selectedDllPath, TEXT('\\')) + 1);
             }
         }
         break;
@@ -410,6 +427,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         PostQuitMessage(ctx->exitCode);
     }
     return DefWindowProc(hWnd, uMsg, wParam, lParam);
+}
+
+int GetDLLPath(InjectorCtx *ctx) {
+    OPENFILENAME ofn = { 0 }; // Initialize structure
+
+    // Set up the OPENFILENAME structure
+    ofn.lStructSize = sizeof(OPENFILENAME);
+    ofn.hwndOwner = ctx->hWnd; // No owner window
+    ofn.lpstrFile = ctx->selectedDllPath;
+    ofn.nMaxFile = sizeof(ctx->selectedDllPath) / sizeof(*ctx->selectedDllPath);
+    ofn.lpstrFilter = TEXT("DLL Files\0*.dll\0"); // File filters
+    ofn.nFilterIndex = 1;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+    // Show the dialog and get the selected file
+    return GetOpenFileName(&ofn);
 }
 
 IconCache *CreateIconCache(void) {
@@ -480,12 +513,4 @@ void CleanupProcessListView(HWND hListView) {
         IconCache *ic = GetWindowLongPtr(hListView, GWLP_USERDATA);
         if (ic) DestroyIconCache(ic);
     }
-}
-
-HICON LoadStockIcon(SHSTOCKICONID id, UINT uFlags) {
-    SHSTOCKICONINFO sii = { sizeof(sii) };
-    if (SUCCEEDED(SHGetStockIconInfo(id, uFlags, &sii))) {
-        return sii.hIcon;
-    }
-    return NULL;
 }
