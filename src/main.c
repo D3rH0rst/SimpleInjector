@@ -1,4 +1,3 @@
-#define _WIN32_WINNT 0x0A00  // Windows 10
 #include <Windows.h>
 #include <windowsx.h>
 #include <tchar.h>
@@ -27,6 +26,8 @@
 #define IMAGERES_REFRESH_ICON_ID 229
 
 #define BUTTON_REFRESH_PROCESSES 1
+#define BUTTON_SELECT_DLL        2
+
 
 typedef struct {
     HINSTANCE hInstance;
@@ -34,6 +35,7 @@ typedef struct {
     HWND hProcessListView;
     FILE *console;
     int exitCode;
+    TCHAR *selectedDllPath;
 } InjectorCtx;
 
 typedef struct {
@@ -224,6 +226,17 @@ int InitUI(HWND hWnd, InjectorCtx *ctx) {
         SendMessage(hButton, WM_SETTEXT, NULL, TEXT("Refresh"));
     }
 
+    hButton = CreateWindow(
+        WC_BUTTON,
+        TEXT("Select DLL"),
+        WS_CHILD | WS_VISIBLE,
+        10, 400, 100, 35,
+        hWnd,
+        (HMENU)BUTTON_SELECT_DLL,
+        NULL,
+        NULL
+    );
+
     return 0;
 }
 
@@ -340,6 +353,7 @@ int GetProcessIcon(HANDLE hProcess, HIMAGELIST hImageList, IconCache *ic) {
 }
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    static HBRUSH hBrush = NULL;
     InjectorCtx *ctx = GetWindowLongPtr(hWnd, GWLP_USERDATA);
     switch (uMsg) {
     case WM_CREATE:
@@ -358,8 +372,39 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         switch (wParam) {
         case BUTTON_REFRESH_PROCESSES:
             UpdateListViewProcesses(ctx->hProcessListView);
+            break;
+        case BUTTON_SELECT_DLL:
+        {
+            TCHAR fileName[MAX_PATH];
+            OPENFILENAME ofn = { 0 };
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hWnd;
+            ofn.lpstrFilter = TEXT(".DLL");
+            ofn.lpstrFile = fileName;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.nFilterIndex = 1;
+            ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+            if (GetOpenFileName(&ofn)) {
+                log_msg("%s", fileName);
+            }
         }
         break;
+        }
+        break;
+    case WM_CTLCOLORSTATIC:
+    {
+        HDC hdcStatic = (HDC)wParam;
+
+        // Set the background mode to transparent
+        SetBkMode(hdcStatic, TRANSPARENT);
+
+        // Return the parent window's background brush
+        if (!hBrush) {
+            hBrush = CreateSolidBrush(GetSysColor(COLOR_WINDOW)); // Matches default background
+        }
+        return (LRESULT)hBrush;
+    }
     case WM_DESTROY:
         CleanupProcessListView(ctx->hProcessListView);
         PostQuitMessage(ctx->exitCode);
