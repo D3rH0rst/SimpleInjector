@@ -25,8 +25,21 @@
 typedef struct {
     HINSTANCE hInstance;
     HWND hWnd;
+    HWND hProcessListView;
     FILE *console;
+    int exitCode;
 } InjectorCtx;
+
+typedef struct {
+    TCHAR path[MAX_PATH];
+    int imageIndex;
+} IconCacheEntry;
+
+typedef struct {
+    IconCacheEntry *items;
+    int count;
+    int capacity;
+} IconCache;
 
 int Init(InjectorCtx*);
 int MainLoop(void);
@@ -36,9 +49,19 @@ void Cleanup(InjectorCtx*);
 int InitConsole(InjectorCtx*);
 #endif
 int InitWindow(InjectorCtx*);
-int InitUI(HWND);
+int InitUI(HWND, InjectorCtx*);
+int InitProcessListView(HWND);
+int UpdateListViewProcesses(HWND);
+int GetProcessIcon(HANDLE hProcess, HIMAGELIST hImageList, IconCache *ic);
+void CleanupProcessListView(HWND);
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+
+
+IconCache *CreateIconCache(void);
+void DestroyIconCache(IconCache *ic);
+int InsertIconToCache(IconCache *ic, const TCHAR *path, int imageIndex);
+IconCacheEntry *FindIconInCache(IconCache *ic, const TCHAR *path);
 
 int WINAPI _WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPTSTR lpCmdLine, _In_ int nShowCmd) {
     InjectorCtx ctx = { 0 };
@@ -153,11 +176,11 @@ int InitWindow(InjectorCtx *ctx) {
     return 0;
 }
 
-int InitUI(HWND hWnd) {
-    HWND hListView = CreateWindow(
+int InitUI(HWND hWnd, InjectorCtx *ctx) {
+    ctx->hProcessListView = CreateWindow(
         WC_LISTVIEW,
         NULL,
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS,
+        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
         10, 10, WINDOW_WIDTH - 10, 340,
         hWnd,
         NULL,
@@ -165,44 +188,60 @@ int InitUI(HWND hWnd) {
         NULL
     );
 
+    if (ctx->hProcessListView == NULL) {
+        log_msg("Failed to Create ListView");
+        return 1;
+    }
+
+    if (InitProcessListView(ctx->hProcessListView) != 0) return 1;
+
+    return 0;
+}
+
+int InitProcessListView(HWND hListView) {
+    ListView_SetExtendedListViewStyle(hListView, LVS_EX_FULLROWSELECT | LVS_EX_AUTOSIZECOLUMNS | LVS_EX_INFOTIP);
+
+    IconCache *ic = CreateIconCache();
+
+    SetWindowLongPtr(hListView, GWLP_USERDATA, (LONG_PTR)ic);
+
     HIMAGELIST hImageList = ImageList_Create(16, 16, ILC_COLOR32 | ILC_MASK, 1, 1);
 
     ListView_SetImageList(hListView, hImageList, LVSIL_SMALL);
+ 
+    TCHAR *lvCols[] = {
+        TEXT("Process Name"),
+        TEXT("Arch"),
+        TEXT("PID"),
+    };
 
-    LVCOLUMN lvc;
-    int iCol = 0;
+    LVCOLUMN lvc = {.mask = LVCF_FMT  | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM};
 
-    lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
+    for (int i = 0; i < (sizeof(lvCols) / sizeof(*lvCols)); i++) {
+        lvc.iSubItem = i;
+        lvc.pszText = lvCols[i];
+        lvc.cx = i == 0 ? WINDOW_WIDTH - 14 * 2 - 100 * 2 : 100;
+        lvc.fmt = i == 1 ? LVCFMT_CENTER : LVCFMT_LEFT;
 
-    lvc.iSubItem = iCol;
-    lvc.pszText = TEXT("Process Name");
-    lvc.cx = 100;
-    lvc.fmt = LVCFMT_LEFT;
+        ListView_InsertColumn(hListView, i, &lvc);
+    }
 
-    ListView_InsertColumn(hListView, iCol++, &lvc);
+    if (UpdateListViewProcesses(hListView) != 0) return 1;
 
-    lvc.iSubItem = iCol;
-    lvc.pszText = TEXT("Architechture");
-    lvc.cx = 100;
-    lvc.fmt = LVCFMT_CENTER;
+    return 0;
+}
 
-    ListView_InsertColumn(hListView, iCol++, &lvc);
+int UpdateListViewProcesses(HWND hListView) {
+    HIMAGELIST hImageList = ListView_GetImageList(hListView, LVSIL_SMALL);
+    IconCache *ic = (IconCache*)GetWindowLongPtr(hListView, GWLP_USERDATA);
+    LVITEM lvi = {.mask = LVIF_TEXT | LVIF_IMAGE};
 
-    lvc.iSubItem = iCol;
-    lvc.pszText = TEXT("PID");
-    lvc.cx = 100;
-    lvc.fmt = LVCFMT_LEFT;
-
-    ListView_InsertColumn(hListView, iCol++, &lvc);
-
-    LVITEM lvi;
-    lvi.mask = LVIF_TEXT | LVIF_IMAGE;
-    lvi.iImage = 0;
-    
+    TCHAR pidStr[16];
+   
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot == INVALID_HANDLE_VALUE) {
-        MessageBox(hWnd, TEXT("Failed to create process snapshot!"), TEXT("Error"), MB_OK | MB_ICONERROR);
-        return 0;
+        MessageBox(NULL, TEXT("Failed to create process snapshot!"), TEXT("Error"), MB_OK | MB_ICONERROR);
+        return 1;
     }
 
     PROCESSENTRY32 pe32 = { sizeof(PROCESSENTRY32) };
@@ -212,57 +251,152 @@ int InitUI(HWND hWnd) {
             lvi.iItem = index;
             lvi.iSubItem = 0;
             lvi.pszText = pe32.szExeFile;
-            ListView_InsertItem(hListView, &lvi);
-            
-            //Add Arch
+            lvi.iImage = 0;
+
             HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe32.th32ProcessID);
+
             if (hProcess) {
+                // Get process icon
+                lvi.iImage = GetProcessIcon(hProcess, hImageList, ic);
+            }
+
+            ListView_InsertItem(hListView, &lvi);
+
+            if (hProcess) {
+                //Add Arch
                 USHORT machine;
                 if (IsWow64Process2(hProcess, &machine, NULL))
-                   ListView_SetItemText(hListView, index, 1, machine == IMAGE_FILE_MACHINE_I386 ? TEXT("x86") : TEXT("x64"));
-                
-                TCHAR exePath[MAX_PATH] = { 0 };
-                DWORD size = MAX_PATH;
-                int iconIndex = 0;
-
-                if (QueryFullProcessImageName(hProcess, 0, exePath, &size)) {
-                    SHFILEINFO sfi = { 0 };
-                    if (SHGetFileInfo(exePath, 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_SMALLICON) && sfi.hIcon) {
-                        iconIndex = ImageList_AddIcon(hImageList, sfi.hIcon);
-                        DestroyIcon(sfi.hIcon);
-                    }
-                }
-
-                lvi.iImage = iconIndex;
+                    ListView_SetItemText(hListView, index, 1, machine == IMAGE_FILE_MACHINE_I386 ? TEXT("x86") : TEXT("x64"));
 
                 CloseHandle(hProcess);
             }
-
+            
             // Add PID
-            TCHAR pidStr[16];
             _stprintf_s(pidStr, sizeof(pidStr) / sizeof(*pidStr), TEXT("%lu"), pe32.th32ProcessID);
             ListView_SetItemText(hListView, index, 2, pidStr);
 
             index++;
         } while (Process32Next(hSnapshot, &pe32));
     }
+
     CloseHandle(hSnapshot);
 
     return 0;
 }
 
+int GetProcessIcon(HANDLE hProcess, HIMAGELIST hImageList, IconCache *ic) {
+    TCHAR exePath[MAX_PATH];
+    DWORD size = MAX_PATH;
+    int iconIndex = 0;
+
+    if (!QueryFullProcessImageName(hProcess, 0, exePath, &size))
+        return 0; // default icon
+
+    IconCacheEntry *ice = FindIconInCache(ic, exePath);
+
+    if (ice != NULL) {
+        return ice->imageIndex;
+    }
+
+    SHFILEINFO sfi = { 0 };
+    if (SHGetFileInfo(exePath, 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_SMALLICON) && sfi.hIcon) {
+        iconIndex = ImageList_AddIcon(hImageList, sfi.hIcon);
+        DestroyIcon(sfi.hIcon);
+        InsertIconToCache(ic, exePath, iconIndex);
+    }
+
+    return iconIndex;
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    InjectorCtx *ctx = GetWindowLongPtr(hWnd, GWLP_USERDATA);
     switch (uMsg) {
     case WM_CREATE:
     {
         CREATESTRUCT *cs = (CREATESTRUCT*)lParam;
-        if (InitUI(hWnd) != 0)
-            PostQuitMessage(1);
+        ctx = cs->lpCreateParams;
+        SetWindowLongPtr(hWnd, GWLP_USERDATA, ctx);
+        if (InitUI(hWnd, ctx) != 0) {
+            ctx->exitCode = EXIT_FAILURE;
+            return -1;
+        }
+            
     }
         break;
-    case WM_CLOSE:
-        PostQuitMessage(0);
-        break;
+    case WM_DESTROY:
+        log_msg("in destroy");
+        CleanupProcessListView(ctx->hProcessListView);
+        PostQuitMessage(ctx->exitCode);
     }
     return DefWindowProc(hWnd, uMsg, wParam, lParam);
+}
+
+IconCache *CreateIconCache(void) {
+    IconCache *ic = malloc(sizeof(IconCache));
+    if (ic == NULL) return NULL;
+
+    ic->capacity = 512;
+    ic->count = 0;
+    ic->items = malloc(ic->capacity * sizeof(IconCacheEntry));
+
+    return ic;
+}
+
+void DestroyIconCache(IconCache *ic) {
+    free(ic->items);
+    ic->capacity = 0;
+    ic->count = 0;
+}
+
+int InsertIconToCache(IconCache *ic, const TCHAR *path, int imageIndex) {
+    if (ic->count >= ic->capacity) {
+        ic->capacity *= 2;
+        void *tmp = realloc(ic->items, ic->capacity * sizeof(IconCacheEntry));
+        if (tmp == NULL) return 1;
+        ic->items = tmp;
+    }
+
+    int left = 0, right = ic->count - 1, mid, cmp, insertPos = 0;
+    while (left <= right) {
+        mid = (left + right) / 2;
+        cmp = _tcscmp(path, ic->items[mid].path);
+        if (cmp == 0) return 0; // already cached;
+        else if (cmp < 0) right = mid - 1;
+        else left = mid + 1;
+    }
+    insertPos = left;
+
+    memmove(&ic->items[insertPos + 1], &ic->items[insertPos], (ic->count - insertPos) * sizeof(IconCacheEntry));
+
+    _tcscpy_s(ic->items[insertPos].path, MAX_PATH, path);
+    ic->items[insertPos].imageIndex = imageIndex;
+    ic->count++;
+
+    return 0;
+}
+
+IconCacheEntry *FindIconInCache(IconCache *ic, const TCHAR *path) {
+    int left = 0, right = ic->count - 1, mid, cmp;
+
+    while (left <= right) {
+        mid = (left + right) / 2;
+        cmp = _tcscmp(path, ic->items[mid].path);
+
+        if (cmp == 0)
+            return &ic->items[mid]; // found
+
+        if (cmp < 0)
+            right = mid - 1;
+        else
+            left = mid + 1;
+    }
+
+    return NULL;
+}
+
+void CleanupProcessListView(HWND hListView) {
+    if (hListView) {
+        IconCache *ic = GetWindowLongPtr(hListView, GWLP_USERDATA);
+        if (ic) DestroyIconCache(ic);
+    }
 }
