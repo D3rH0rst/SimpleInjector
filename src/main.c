@@ -195,6 +195,16 @@ int InitUI(HWND hWnd, InjectorCtx *ctx) {
 
     if (InitProcessListView(ctx->hProcessListView) != 0) return 1;
 
+    CreateWindow(
+        WC_BUTTON,
+        TEXT("Refresh Processes"),
+        WS_CHILD | WS_VISIBLE,
+        10, 360, 200, 75,
+        hWnd,
+        (HMENU)1,
+        NULL,
+        NULL
+    );
     return 0;
 }
 
@@ -232,8 +242,10 @@ int InitProcessListView(HWND hListView) {
 }
 
 int UpdateListViewProcesses(HWND hListView) {
+    ListView_DeleteAllItems(hListView);
     HIMAGELIST hImageList = ListView_GetImageList(hListView, LVSIL_SMALL);
     IconCache *ic = (IconCache*)GetWindowLongPtr(hListView, GWLP_USERDATA);
+
     LVITEM lvi = {.mask = LVIF_TEXT | LVIF_IMAGE};
 
     TCHAR pidStr[16];
@@ -323,8 +335,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             
     }
         break;
+    case WM_COMMAND:
+        switch (wParam) {
+        case 1:
+            UpdateListViewProcesses(ctx->hProcessListView);
+        }
+        break;
     case WM_DESTROY:
-        log_msg("in destroy");
         CleanupProcessListView(ctx->hProcessListView);
         PostQuitMessage(ctx->exitCode);
     }
