@@ -1,4 +1,6 @@
+#define _WIN32_WINNT 0x0A00  // Windows 10
 #include <Windows.h>
+#include <windowsx.h>
 #include <tchar.h>
 #include <stdio.h>
 #include <commctrl.h>
@@ -21,6 +23,10 @@
 #define WNDCLASSNAME TEXT("SimpleInjector_WndClass")
 #define WINDOW_WIDTH 400
 #define WINDOW_HEIGHT 600
+
+#define IMAGERES_REFRESH_ICON_ID 229
+
+#define BUTTON_REFRESH_PROCESSES 1
 
 typedef struct {
     HINSTANCE hInstance;
@@ -62,6 +68,8 @@ IconCache *CreateIconCache(void);
 void DestroyIconCache(IconCache *ic);
 int InsertIconToCache(IconCache *ic, const TCHAR *path, int imageIndex);
 IconCacheEntry *FindIconInCache(IconCache *ic, const TCHAR *path);
+
+HICON LoadStockIcon(SHSTOCKICONID id, UINT uFlags);
 
 int WINAPI _WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPTSTR lpCmdLine, _In_ int nShowCmd) {
     InjectorCtx ctx = { 0 };
@@ -181,7 +189,7 @@ int InitUI(HWND hWnd, InjectorCtx *ctx) {
         WC_LISTVIEW,
         NULL,
         WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
-        10, 10, WINDOW_WIDTH - 10, 340,
+        10, 45, WINDOW_WIDTH - 20, 340,
         hWnd,
         NULL,
         NULL,
@@ -195,16 +203,27 @@ int InitUI(HWND hWnd, InjectorCtx *ctx) {
 
     if (InitProcessListView(ctx->hProcessListView) != 0) return 1;
 
-    CreateWindow(
+    CreateWindow(WC_STATIC, TEXT("Simple Injector"), WS_CHILD | WS_VISIBLE, 150, 5, WINDOW_WIDTH - 50, 35, hWnd, NULL, NULL, NULL);
+
+    HWND hButton = CreateWindow(
         WC_BUTTON,
-        TEXT("Refresh Processes"),
-        WS_CHILD | WS_VISIBLE,
-        10, 360, 200, 75,
+        NULL,
+        WS_CHILD | WS_VISIBLE | BS_ICON | BS_TEXT,
+        10, 5, 35, 35,
         hWnd,
-        (HMENU)1,
+        (HMENU)BUTTON_REFRESH_PROCESSES,
         NULL,
         NULL
     );
+
+    HICON iconLarge = NULL;
+    ExtractIconEx(TEXT("C:\\Windows\\System32\\imageres.dll"), IMAGERES_REFRESH_ICON_ID, &iconLarge, NULL, 1);
+    if (iconLarge) SendMessage(hButton, BM_SETIMAGE, IMAGE_ICON, (LPARAM)iconLarge);
+    else {
+        SetWindowPos(hButton, HWND_TOP, 0, 0, 100, 35, SWP_NOMOVE);
+        SendMessage(hButton, WM_SETTEXT, NULL, TEXT("Refresh"));
+    }
+
     return 0;
 }
 
@@ -230,7 +249,7 @@ int InitProcessListView(HWND hListView) {
     for (int i = 0; i < (sizeof(lvCols) / sizeof(*lvCols)); i++) {
         lvc.iSubItem = i;
         lvc.pszText = lvCols[i];
-        lvc.cx = i == 0 ? WINDOW_WIDTH - 14 * 2 - 100 * 2 : 100;
+        lvc.cx = i == 0 ? WINDOW_WIDTH - 19 * 2 - 100 * 2 : 100;
         lvc.fmt = i == 1 ? LVCFMT_CENTER : LVCFMT_LEFT;
 
         ListView_InsertColumn(hListView, i, &lvc);
@@ -337,7 +356,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         break;
     case WM_COMMAND:
         switch (wParam) {
-        case 1:
+        case BUTTON_REFRESH_PROCESSES:
             UpdateListViewProcesses(ctx->hProcessListView);
         }
         break;
@@ -416,4 +435,12 @@ void CleanupProcessListView(HWND hListView) {
         IconCache *ic = GetWindowLongPtr(hListView, GWLP_USERDATA);
         if (ic) DestroyIconCache(ic);
     }
+}
+
+HICON LoadStockIcon(SHSTOCKICONID id, UINT uFlags) {
+    SHSTOCKICONINFO sii = { sizeof(sii) };
+    if (SUCCEEDED(SHGetStockIconInfo(id, uFlags, &sii))) {
+        return sii.hIcon;
+    }
+    return NULL;
 }
