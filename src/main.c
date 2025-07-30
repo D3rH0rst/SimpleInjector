@@ -28,6 +28,7 @@
 
 #define BUTTON_REFRESH_PROCESSES 1
 #define BUTTON_SELECT_DLL        2
+#define BUTTON_INJECT            3
 
 
 typedef struct {
@@ -36,9 +37,13 @@ typedef struct {
     HWND hProcessListView;
     HWND hSelectedDllLabel;
     HWND hSelectedDllIcon;
+    HWND hSelectedProcessLabel;
+    HWND hInjectButton;
     FILE *console;
     int exitCode;
+    BOOL hasDllSelected;
     TCHAR selectedDllPath[MAX_PATH];
+    DWORD selectedPID;
 } InjectorCtx;
 
 typedef struct {
@@ -61,8 +66,8 @@ int InitConsole(InjectorCtx*);
 #endif
 int InitWindow(InjectorCtx*);
 int InitUI(HWND, InjectorCtx*);
-int InitProcessListView(HWND);
-int UpdateListViewProcesses(HWND);
+int InitProcessListView(HWND, DWORD);
+int UpdateListViewProcesses(HWND, DWORD);
 int GetProcessIcon(HANDLE hProcess, HIMAGELIST hImageList, IconCache *ic);
 void CleanupProcessListView(HWND);
 
@@ -79,7 +84,8 @@ IconCacheEntry *FindIconInCache(IconCache *ic, const TCHAR *path);
 
 int WINAPI _WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPTSTR lpCmdLine, _In_ int nShowCmd) {
     InjectorCtx ctx = { 0 };
-    
+    ctx.selectedPID = -1;
+
     ctx.hInstance = hInstance;
 
     if (Init(&ctx) != 0) {
@@ -207,7 +213,7 @@ int InitUI(HWND hWnd, InjectorCtx *ctx) {
         return 1;
     }
 
-    if (InitProcessListView(ctx->hProcessListView) != 0) return 1;
+    if (InitProcessListView(ctx->hProcessListView, -1) != 0) return 1;
 
     CreateWindow(WC_STATIC, TEXT("Simple Injector"), WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, 150, 5, WINDOW_WIDTH - 50, 35, hWnd, NULL, NULL, NULL);
 
@@ -230,11 +236,19 @@ int InitUI(HWND hWnd, InjectorCtx *ctx) {
         SendMessage(hButton, WM_SETTEXT, NULL, TEXT("Refresh"));
     }
 
+    ctx->hSelectedProcessLabel = CreateWindow(
+        WC_STATIC,
+        TEXT("Selected Process: -"),
+        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+        10, 400, 350, 35,
+        hWnd, NULL, NULL, NULL
+    );
+
     hButton = CreateWindow(
         WC_BUTTON,
         TEXT("Select DLL"),
         WS_CHILD | WS_VISIBLE,
-        10, 400, 100, 35,
+        10, 450, 100, 35,
         hWnd,
         (HMENU)BUTTON_SELECT_DLL,
         NULL,
@@ -245,7 +259,7 @@ int InitUI(HWND hWnd, InjectorCtx *ctx) {
         WC_STATIC,
         NULL,
         WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-        165, 400, 100, 35,
+        165, 450, 100, 35,
         hWnd, NULL, NULL, NULL
     );
 
@@ -253,7 +267,7 @@ int InitUI(HWND hWnd, InjectorCtx *ctx) {
         WC_STATIC,
         NULL,
         WS_CHILD | SS_ICON,
-        130, 400, 35, 35,
+        130, 450, 35, 35,
         hWnd, NULL, NULL, NULL
     );
 
@@ -263,10 +277,21 @@ int InitUI(HWND hWnd, InjectorCtx *ctx) {
     
     SendMessage(ctx->hSelectedDllIcon, STM_SETICON, (WPARAM)sfi.hIcon, 0);
 
+    ctx->hInjectButton = CreateWindow(
+        WC_BUTTON,
+        TEXT("Inject"),
+        WS_CHILD | WS_VISIBLE  | WS_DISABLED,
+        10, 500, 100, 35,
+        hWnd,
+        (HMENU)BUTTON_INJECT,
+        NULL,
+        NULL
+    );
+
     return 0;
 }
 
-int InitProcessListView(HWND hListView) {
+int InitProcessListView(HWND hListView, DWORD selectPID) {
     ListView_SetExtendedListViewStyle(hListView, LVS_EX_FULLROWSELECT | LVS_EX_AUTOSIZECOLUMNS | LVS_EX_INFOTIP);
 
     IconCache *ic = CreateIconCache();
@@ -294,17 +319,17 @@ int InitProcessListView(HWND hListView) {
         ListView_InsertColumn(hListView, i, &lvc);
     }
 
-    if (UpdateListViewProcesses(hListView) != 0) return 1;
+    if (UpdateListViewProcesses(hListView, selectPID) != 0) return 1;
 
     return 0;
 }
 
-int UpdateListViewProcesses(HWND hListView) {
+int UpdateListViewProcesses(HWND hListView, DWORD selectPID) {
     ListView_DeleteAllItems(hListView);
     HIMAGELIST hImageList = ListView_GetImageList(hListView, LVSIL_SMALL);
     IconCache *ic = (IconCache*)GetWindowLongPtr(hListView, GWLP_USERDATA);
 
-    LVITEM lvi = {.mask = LVIF_TEXT | LVIF_IMAGE};
+    LVITEM lvi = {.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_PARAM};
 
     TCHAR pidStr[16];
    
@@ -322,6 +347,7 @@ int UpdateListViewProcesses(HWND hListView) {
             lvi.iSubItem = 0;
             lvi.pszText = pe32.szExeFile;
             lvi.iImage = 0;
+            lvi.lParam = pe32.th32ProcessID;
 
             HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe32.th32ProcessID);
 
@@ -344,6 +370,9 @@ int UpdateListViewProcesses(HWND hListView) {
             // Add PID
             _stprintf_s(pidStr, sizeof(pidStr) / sizeof(*pidStr), TEXT("%lu"), pe32.th32ProcessID);
             ListView_SetItemText(hListView, index, 2, pidStr);
+            if (pe32.th32ProcessID == selectPID) {
+                ListView_SetItemState(hListView, index, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            }
 
             index++;
         } while (Process32Next(hSnapshot, &pe32));
@@ -391,26 +420,70 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             ctx->exitCode = EXIT_FAILURE;
             return -1;
         }
-            
     }
         break;
     case WM_COMMAND:
         switch (wParam) {
         case BUTTON_REFRESH_PROCESSES:
-            UpdateListViewProcesses(ctx->hProcessListView);
+            UpdateListViewProcesses(ctx->hProcessListView, ctx->selectedPID);
             break;
-        case BUTTON_SELECT_DLL:
-        {
+        case BUTTON_SELECT_DLL: {
             if (GetDLLPath(ctx)) {
+                ctx->hasDllSelected = TRUE;
                 ShowWindow(ctx->hSelectedDllIcon, SW_SHOW);
                 Static_SetText(ctx->hSelectedDllLabel, _tcsrchr(ctx->selectedDllPath, TEXT('\\')) + 1);
+                
+                if (ctx->selectedPID != -1)
+                    EnableWindow(ctx->hInjectButton, TRUE);
+            }
+        }
+        break;
+        case BUTTON_INJECT: {
+            int iPos = ListView_GetNextItem(ctx->hProcessListView, -1, LVNI_SELECTED);
+            log_msg("iPos: %d", iPos);
+            if (iPos != -1) {
+                LVITEM lvi = { 0 };
+                lvi.mask = LVIF_PARAM;
+                lvi.iItem = iPos;
+                ListView_GetItem(ctx->hProcessListView, &lvi);
+                log_msg("Selected Process PID: %d", (int)lvi.lParam);
             }
         }
         break;
         }
         break;
-    case WM_CTLCOLORSTATIC:
-    {
+    case WM_NOTIFY: {
+        LPNMHDR hdr = (LPNMHDR)lParam;
+
+        if (hdr->hwndFrom == ctx->hProcessListView && hdr->code == LVN_ITEMCHANGED) {
+            NMLISTVIEW *pnmv = (NMLISTVIEW *)lParam;
+
+            // Check if the selection state changed
+            if ((pnmv->uChanged & LVIF_STATE) &&
+                (pnmv->uNewState & LVIS_SELECTED) &&
+                !(pnmv->uOldState & LVIS_SELECTED)) {
+
+                int selectedIndex = pnmv->iItem;
+                TCHAR buf[256];
+                TCHAR processName[128];
+                ListView_GetItemText(ctx->hProcessListView, pnmv->iItem, 0, processName, sizeof(processName) / sizeof(*processName));
+                _stprintf_s(buf, sizeof(buf) / sizeof(*buf), TEXT("Selected Process: %s"), processName);
+                Static_SetText(ctx->hSelectedProcessLabel, buf);
+                
+                LVITEM lvi = { 0 };
+                lvi.mask = LVIF_PARAM;
+                lvi.iItem = pnmv->iItem;
+                ListView_GetItem(ctx->hProcessListView, &lvi);
+
+                ctx->selectedPID = lvi.lParam;
+                
+                if (ctx->hasDllSelected)
+                    EnableWindow(ctx->hInjectButton, TRUE);
+            }
+        }
+        break;
+    }
+    case WM_CTLCOLORSTATIC: {
         HDC hdcStatic = (HDC)wParam;
 
         // Set the background mode to transparent
@@ -430,18 +503,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 }
 
 int GetDLLPath(InjectorCtx *ctx) {
-    OPENFILENAME ofn = { 0 }; // Initialize structure
+    OPENFILENAME ofn = { 0 };
 
-    // Set up the OPENFILENAME structure
     ofn.lStructSize = sizeof(OPENFILENAME);
-    ofn.hwndOwner = ctx->hWnd; // No owner window
+    ofn.hwndOwner = ctx->hWnd;
     ofn.lpstrFile = ctx->selectedDllPath;
     ofn.nMaxFile = sizeof(ctx->selectedDllPath) / sizeof(*ctx->selectedDllPath);
     ofn.lpstrFilter = TEXT("DLL Files\0*.dll\0"); // File filters
     ofn.nFilterIndex = 1;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
 
-    // Show the dialog and get the selected file
     return GetOpenFileName(&ofn);
 }
 
