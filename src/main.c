@@ -5,6 +5,7 @@
 #include <commctrl.h>
 #include <tlhelp32.h>
 #include <shobjidl_core.h>
+#include "injector.h"
 
 #ifdef UNICODE
 #define _WinMain wWinMain
@@ -438,18 +439,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             }
         }
         break;
-        case BUTTON_INJECT: {
-            int iPos = ListView_GetNextItem(ctx->hProcessListView, -1, LVNI_SELECTED);
-            log_msg("iPos: %d", iPos);
-            if (iPos != -1) {
-                LVITEM lvi = { 0 };
-                lvi.mask = LVIF_PARAM;
-                lvi.iItem = iPos;
-                ListView_GetItem(ctx->hProcessListView, &lvi);
-                log_msg("Selected Process PID: %d", (int)lvi.lParam);
-            }
-        }
-        break;
+        case BUTTON_INJECT:
+            Inject(ctx->selectedPID, ctx->selectedDllPath);
+            break;
         }
         break;
     case WM_NOTIFY: {
